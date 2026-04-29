@@ -4,27 +4,28 @@ This is the name for the execution model where **no material action is valid mer
 
 ## Binding order
 
-1. **Canonical semantics** — intermediate representation (IR), not ad hoc strings  
-2. **Capability jurisdiction** — manifests state what each substrate can realize  
-3. **Policy class** — regimes of admissibility (A/B/C/D); **D** is *reserved*: representable in graphs but **not** admitted at the normal runtime execution boundary (use deliberation or authority paths).  
-4. **Authority rules** — who may confirm or escalate  
-5. **Evidence obligations** — what must be recorded for an act to *close*  
-6. **Explicit boundaries** between cognition, deliberation, and execution  
+1. **Canonical semantics** — intermediate representation (IR), not ad hoc strings
+2. **Capability jurisdiction** — manifests state what each substrate can realize
+3. **Policy class** — regimes of admissibility (A/B/C/D); **D** is *reserved*: representable in graphs but **not** admitted at the normal runtime execution boundary (use deliberation or authority paths).
+4. **Authority rules** — who may confirm or escalate
+5. **Evidence obligations** — what must be recorded for an act to *close*
+6. **Explicit boundaries** between cognition, deliberation, and execution
 
 ## Formulations
 
 - *The runtime is constitutional because execution is not sovereign. It is bound by a prior semantic, policy, authority, capability, and evidence order.*
-
 - *A constitutional runtime is one in which no material action is valid merely because it is executable; it must also be semantically admissible, policy-permitted, capability-realizable, and evidentially accountable.*
 
 ## Separation of powers (conceptual)
 
-| Layer | Power |
-|-------|--------|
-| Place agent | Cognitive — proposes structure and intent |
-| Decision / planner | Deliberative — chooses paths and substrate |
+
+| Layer              | Power                                                |
+| ------------------ | ---------------------------------------------------- |
+| Place agent        | Cognitive — proposes structure and intent            |
+| Decision / planner | Deliberative — chooses paths and substrate           |
 | Lowerer / executor | Executive — does not “legislate” beyond the contract |
-| Evidence system | Archival — audit, replay, justification |
+| Evidence system    | Archival — audit, replay, justification              |
+
 
 ## Pipeline
 
@@ -54,3 +55,5 @@ Strong grammar
 ## Ingress
 
 Natural language ingress is a **progressive refinement** under cost constraints, not a single translation step. Premium LLM use is a **constitutional exception path** (planned, rare, logged)—not the default operating loop.
+
+**Related:** [Documentation index](../README.md) · [IR and lowering](ir-and-lowering.md) · [Crate reference](crate-reference.md)
