@@ -2,3 +2,9 @@
 .cargo-target-local
 **/*.rs.bk
 .DS_Store
+.env
+.env.*
+*.db
+*.sqlite
+*.sqlite3
+.mcp.json
