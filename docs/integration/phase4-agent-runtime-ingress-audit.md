@@ -165,9 +165,28 @@ shell/audit note -> no evidence closure
 lowering, if reached later -> stop before dispatch
 ```
 
+## Later Status - Phase 4B
+
+Phase 4B added explicit pocket-runtime data types in `crates/minilab-api/src/agent_runtime.rs`:
+
+- `IngressState`
+- `CandidateKind`
+- `AdmissionState`
+- `NaturalLanguageOrigin`
+- `PocketRuntimeStateRecord`
+
+This is type surface only. It does not mount the Agent Runtime route, change classifier behavior, admit natural language to IR, lower candidates, dispatch, mutate providers/databases, or write canonical evidence.
+
+Receipts for the scoped slice:
+
+- `cargo test -p minilab-api agent_runtime` passed: 7 Agent Runtime tests
+- `cargo test --workspace` passed: 243 tests
+- `cargo clippy --workspace --all-targets -- -D warnings` passed
+- forbidden token scan in `crates/minilab-api/src/agent_runtime.rs` found execution tokens only inside the negative serialization test assertions
+
 ## Ghosts
 
-- Phase 4 code is not implemented by this audit.
+- Phase 4B type surface exists, but classifier integration, candidate admission, and lowering gates are not implemented by this audit.
 - The main API route mount for Agent Runtime remains unresolved.
 - Existing shell completion statuses may confuse future callers until typed pocket-runtime state is introduced.
 - Evidence closure for natural-language-originated programs remains outside this audit.

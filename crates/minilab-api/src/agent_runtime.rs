@@ -131,6 +131,65 @@ pub struct AgentRuntimeExternalTool {
     pub supervision: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IngressState {
+    Received,
+    Classified,
+    ClarificationRequired,
+    Rejected,
+    GhostRecorded,
+    CandidateProposed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CandidateKind {
+    StrongCandidate,
+    OperationalCandidate,
+    ClarificationRequired,
+    Rejected,
+    GhostRecord,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionState {
+    NotAdmitted,
+    AdmissibilityPending,
+    AdmittedToIr,
+    Validated,
+    Planned,
+    Lowered,
+    StoppedBeforeDispatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NaturalLanguageOrigin {
+    pub message_id: String,
+    pub place_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PocketRuntimeStateRecord {
+    pub origin: NaturalLanguageOrigin,
+    pub ingress_state: IngressState,
+    pub candidate_kind: CandidateKind,
+    pub admission_state: AdmissionState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ghost_flags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposed_payload: Option<Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRuntimeSessionSnapshot {
@@ -1022,6 +1081,69 @@ mod tests {
             .allowed_outputs
             .iter()
             .any(|value| value == "proposal"));
+    }
+
+    #[test]
+    fn pocket_runtime_state_record_serializes_as_data_only() {
+        let record = PocketRuntimeStateRecord {
+            origin: NaturalLanguageOrigin {
+                message_id: "msg-1".into(),
+                place_id: "chatgpt_workspace".into(),
+                session_id: Some("session-1".into()),
+                app_id: Some("chatgpt_workspace_agent".into()),
+            },
+            ingress_state: IngressState::CandidateProposed,
+            candidate_kind: CandidateKind::OperationalCandidate,
+            admission_state: AdmissionState::NotAdmitted,
+            reason_code: Some("material_action_requires_admission".into()),
+            ghost_flags: vec!["scope_requires_confirmation".into()],
+            proposed_payload: Some(serde_json::json!({
+                "action_kind": "outbound.send"
+            })),
+        };
+
+        let value = serde_json::to_value(record).expect("record should serialize");
+        assert_eq!(value["ingressState"], "candidate_proposed");
+        assert_eq!(value["candidateKind"], "operational_candidate");
+        assert_eq!(value["admissionState"], "not_admitted");
+
+        let encoded = serde_json::to_string(&value).expect("json should encode");
+        for forbidden in [
+            "dispatcher",
+            "execute_compiled_plan",
+            "dispatch_operational_command",
+            "EvidenceStore",
+            "provider_client",
+            "database_client",
+            "process",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "pocket runtime record must not serialize execution handle `{forbidden}`"
+            );
+        }
+    }
+
+    #[test]
+    fn natural_language_origin_begins_not_admitted() {
+        let record = PocketRuntimeStateRecord {
+            origin: NaturalLanguageOrigin {
+                message_id: "msg-2".into(),
+                place_id: "chatgpt_workspace".into(),
+                session_id: None,
+                app_id: None,
+            },
+            ingress_state: IngressState::Received,
+            candidate_kind: CandidateKind::ClarificationRequired,
+            admission_state: AdmissionState::NotAdmitted,
+            reason_code: Some("raw_language_not_admitted".into()),
+            ghost_flags: vec![],
+            proposed_payload: None,
+        };
+
+        assert_eq!(record.ingress_state, IngressState::Received);
+        assert_eq!(record.admission_state, AdmissionState::NotAdmitted);
+        assert!(record.proposed_payload.is_none());
     }
 
     #[test]
