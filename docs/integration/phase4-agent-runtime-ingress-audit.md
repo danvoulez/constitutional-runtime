@@ -184,9 +184,45 @@ Receipts for the scoped slice:
 - `cargo clippy --workspace --all-targets -- -D warnings` passed
 - forbidden token scan in `crates/minilab-api/src/agent_runtime.rs` found execution tokens only inside the negative serialization test assertions
 
+## Later Status - Phase 4C
+
+Phase 4C added a deterministic, data-only natural-language classifier:
+
+```text
+NaturalLanguageIngressInput
+-> classify_natural_language_candidate
+-> PocketRuntimeStateRecord
+```
+
+The classifier can produce:
+
+- `StrongCandidate`
+- `OperationalCandidate`
+- `ClarificationRequired`
+- `Rejected`
+- `GhostRecord`
+
+It always leaves `AdmissionState` as `NotAdmitted`. It does not compile Strong JSON, admit IR, lower plans, mount routes, call tools, dispatch, mutate providers/databases, or write canonical evidence.
+
+Current deterministic v0 coverage:
+
+- empty message -> rejected with `missing_intent`
+- reconcile with installation id -> operational candidate
+- reconcile without installation id -> clarification required
+- Strong JSON-shaped input -> Strong candidate
+- unreceipted safe/done/verified/production-ready claim -> evidence ghost
+- direct tool language such as `run this now` -> rejected
+
+Receipts for the scoped slice:
+
+- `cargo test -p minilab-api agent_runtime` passed: 14 Agent Runtime tests
+- `cargo test --workspace` passed: 250 tests
+- `cargo clippy --workspace --all-targets -- -D warnings` passed
+- forbidden token scan in `crates/minilab-api/src/agent_runtime.rs` found no classifier side-effect path; matches were existing shell/status vocabulary and negative test assertions
+
 ## Ghosts
 
-- Phase 4B type surface exists, but classifier integration, candidate admission, and lowering gates are not implemented by this audit.
+- Phase 4C classifier surface exists, but submit-message integration, candidate admission, and lowering gates are not implemented by this audit.
 - The main API route mount for Agent Runtime remains unresolved.
 - Existing shell completion statuses may confuse future callers until typed pocket-runtime state is introduced.
 - Evidence closure for natural-language-originated programs remains outside this audit.

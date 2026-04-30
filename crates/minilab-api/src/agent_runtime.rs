@@ -190,6 +190,167 @@ pub struct PocketRuntimeStateRecord {
     pub proposed_payload: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NaturalLanguageIngressInput {
+    pub origin: NaturalLanguageOrigin,
+    pub text: String,
+}
+
+pub fn classify_natural_language_candidate(
+    input: NaturalLanguageIngressInput,
+) -> PocketRuntimeStateRecord {
+    let text = input.text.trim();
+    let lower = text.to_lowercase();
+
+    if text.is_empty() {
+        return pocket_record(
+            input.origin,
+            IngressState::Rejected,
+            CandidateKind::Rejected,
+            "missing_intent",
+            vec!["missing_intent"],
+            None,
+        );
+    }
+
+    if asks_for_unreceipted_closure(&lower) {
+        return pocket_record(
+            input.origin,
+            IngressState::GhostRecorded,
+            CandidateKind::GhostRecord,
+            "missing_evidence_receipt",
+            vec!["missing_evidence", "missing_receipt"],
+            Some(serde_json::json!({ "claim": text })),
+        );
+    }
+
+    if let Some(payload) = strong_json_candidate(text) {
+        return pocket_record(
+            input.origin,
+            IngressState::CandidateProposed,
+            CandidateKind::StrongCandidate,
+            "strong_candidate_requires_admission",
+            vec![],
+            Some(payload),
+        );
+    }
+
+    if lower.contains("reconcile") {
+        if let Some(installation_id) = extract_uuid(text) {
+            return pocket_record(
+                input.origin,
+                IngressState::CandidateProposed,
+                CandidateKind::OperationalCandidate,
+                "operational_candidate_requires_admission",
+                vec![],
+                Some(serde_json::json!({
+                    "intent": "reconcile_installation",
+                    "installation_id": installation_id
+                })),
+            );
+        }
+
+        return pocket_record(
+            input.origin,
+            IngressState::ClarificationRequired,
+            CandidateKind::ClarificationRequired,
+            "missing_installation_id",
+            vec!["missing_installation_id"],
+            Some(serde_json::json!({ "intent": "reconcile_installation" })),
+        );
+    }
+
+    if asks_for_direct_tool_use(&lower) {
+        return pocket_record(
+            input.origin,
+            IngressState::Rejected,
+            CandidateKind::Rejected,
+            "direct_tool_request_not_admitted",
+            vec!["direct_tool_request"],
+            Some(serde_json::json!({ "request": text })),
+        );
+    }
+
+    pocket_record(
+        input.origin,
+        IngressState::ClarificationRequired,
+        CandidateKind::ClarificationRequired,
+        "candidate_type_unclear",
+        vec!["ambiguous_intent"],
+        Some(serde_json::json!({ "message": text })),
+    )
+}
+
+fn pocket_record(
+    origin: NaturalLanguageOrigin,
+    ingress_state: IngressState,
+    candidate_kind: CandidateKind,
+    reason_code: &str,
+    ghost_flags: Vec<&str>,
+    proposed_payload: Option<Value>,
+) -> PocketRuntimeStateRecord {
+    PocketRuntimeStateRecord {
+        origin,
+        ingress_state,
+        candidate_kind,
+        admission_state: AdmissionState::NotAdmitted,
+        reason_code: Some(reason_code.into()),
+        ghost_flags: ghost_flags.into_iter().map(str::to_string).collect(),
+        proposed_payload,
+    }
+}
+
+fn asks_for_unreceipted_closure(lower: &str) -> bool {
+    let asks_for_closure = [
+        "is it safe",
+        "is this safe",
+        "is it done",
+        "is this done",
+        "verified",
+        "production-ready",
+        "production ready",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    asks_for_closure && !lower.contains("receipt")
+}
+
+fn asks_for_direct_tool_use(lower: &str) -> bool {
+    [
+        "run this now",
+        "run command",
+        "call the tool",
+        "call tool",
+        "use tool",
+        "shell out",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+}
+
+fn strong_json_candidate(text: &str) -> Option<Value> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let kind = value.get("kind").and_then(Value::as_str)?;
+    matches!(
+        kind,
+        "Pipeline"
+            | "Emit"
+            | "Confirm"
+            | "Execute"
+            | "OnSuccess"
+            | "OnFailure"
+            | "SystemReview"
+            | "DriftReview"
+    )
+    .then_some(value)
+}
+
+fn extract_uuid(text: &str) -> Option<String> {
+    text.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-'))
+        .find_map(|part| Uuid::parse_str(part).ok().map(|uuid| uuid.to_string()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRuntimeSessionSnapshot {
@@ -1070,6 +1231,22 @@ async fn get_session(
 mod tests {
     use super::*;
 
+    fn origin(message_id: &str) -> NaturalLanguageOrigin {
+        NaturalLanguageOrigin {
+            message_id: message_id.into(),
+            place_id: "chatgpt_workspace".into(),
+            session_id: None,
+            app_id: None,
+        }
+    }
+
+    fn classify(text: &str) -> PocketRuntimeStateRecord {
+        classify_natural_language_candidate(NaturalLanguageIngressInput {
+            origin: origin("msg-test"),
+            text: text.into(),
+        })
+    }
+
     #[test]
     fn embedded_profile_loads() {
         let service = AgentRuntimeService::new().expect("embedded profile should parse");
@@ -1144,6 +1321,142 @@ mod tests {
         assert_eq!(record.ingress_state, IngressState::Received);
         assert_eq!(record.admission_state, AdmissionState::NotAdmitted);
         assert!(record.proposed_payload.is_none());
+    }
+
+    #[test]
+    fn deterministic_classifier_rejects_empty_message_with_missing_intent_ghost() {
+        let record = classify("   ");
+        assert_eq!(record.ingress_state, IngressState::Rejected);
+        assert_eq!(record.candidate_kind, CandidateKind::Rejected);
+        assert_eq!(record.admission_state, AdmissionState::NotAdmitted);
+        assert_eq!(record.reason_code.as_deref(), Some("missing_intent"));
+        assert!(record
+            .ghost_flags
+            .iter()
+            .any(|flag| flag == "missing_intent"));
+        assert!(record.proposed_payload.is_none());
+    }
+
+    #[test]
+    fn deterministic_classifier_maps_reconcile_with_id_to_operational_candidate() {
+        let installation_id = "8d4df830-4d1f-4a9f-bc17-7de11580d8f3";
+        let record = classify(&format!("please reconcile installation {installation_id}"));
+
+        assert_eq!(record.ingress_state, IngressState::CandidateProposed);
+        assert_eq!(record.candidate_kind, CandidateKind::OperationalCandidate);
+        assert_eq!(record.admission_state, AdmissionState::NotAdmitted);
+        assert_eq!(
+            record.reason_code.as_deref(),
+            Some("operational_candidate_requires_admission")
+        );
+        assert_eq!(
+            record.proposed_payload.as_ref().unwrap()["intent"],
+            "reconcile_installation"
+        );
+        assert_eq!(
+            record.proposed_payload.as_ref().unwrap()["installation_id"],
+            installation_id
+        );
+    }
+
+    #[test]
+    fn deterministic_classifier_requires_installation_id_for_reconcile() {
+        let record = classify("reconcile the installation");
+
+        assert_eq!(record.ingress_state, IngressState::ClarificationRequired);
+        assert_eq!(record.candidate_kind, CandidateKind::ClarificationRequired);
+        assert_eq!(record.admission_state, AdmissionState::NotAdmitted);
+        assert_eq!(
+            record.reason_code.as_deref(),
+            Some("missing_installation_id")
+        );
+        assert!(record
+            .ghost_flags
+            .iter()
+            .any(|flag| flag == "missing_installation_id"));
+    }
+
+    #[test]
+    fn deterministic_classifier_maps_strong_json_to_strong_candidate() {
+        let record = classify(
+            r#"{
+                "kind": "Pipeline",
+                "steps": [
+                    { "kind": "Emit", "event": "demo.started" },
+                    { "kind": "Confirm", "subject": "demo.confirmed" }
+                ]
+            }"#,
+        );
+
+        assert_eq!(record.ingress_state, IngressState::CandidateProposed);
+        assert_eq!(record.candidate_kind, CandidateKind::StrongCandidate);
+        assert_eq!(record.admission_state, AdmissionState::NotAdmitted);
+        assert_eq!(
+            record.reason_code.as_deref(),
+            Some("strong_candidate_requires_admission")
+        );
+        assert_eq!(
+            record.proposed_payload.as_ref().unwrap()["kind"],
+            "Pipeline"
+        );
+    }
+
+    #[test]
+    fn deterministic_classifier_records_evidence_ghost_for_unreceipted_closure_claim() {
+        let record = classify("is this verified and production-ready?");
+
+        assert_eq!(record.ingress_state, IngressState::GhostRecorded);
+        assert_eq!(record.candidate_kind, CandidateKind::GhostRecord);
+        assert_eq!(record.admission_state, AdmissionState::NotAdmitted);
+        assert_eq!(
+            record.reason_code.as_deref(),
+            Some("missing_evidence_receipt")
+        );
+        assert!(record
+            .ghost_flags
+            .iter()
+            .any(|flag| flag == "missing_receipt"));
+    }
+
+    #[test]
+    fn deterministic_classifier_rejects_direct_tool_language_without_action() {
+        let record = classify("run this now");
+
+        assert_eq!(record.ingress_state, IngressState::Rejected);
+        assert_eq!(record.candidate_kind, CandidateKind::Rejected);
+        assert_eq!(record.admission_state, AdmissionState::NotAdmitted);
+        assert_eq!(
+            record.reason_code.as_deref(),
+            Some("direct_tool_request_not_admitted")
+        );
+        assert!(record
+            .ghost_flags
+            .iter()
+            .any(|flag| flag == "direct_tool_request"));
+    }
+
+    #[test]
+    fn deterministic_classifier_record_has_no_action_side_effect_path() {
+        let record = classify("reconcile installation 8d4df830-4d1f-4a9f-bc17-7de11580d8f3");
+        let encoded = serde_json::to_string(&record).expect("classification should serialize");
+
+        for forbidden in [
+            "dispatch",
+            "Dispatcher",
+            "append_evidence",
+            "append_evidence_note",
+            "Command",
+            "std::process",
+            "tokio::process",
+            "reqwest",
+            "rusqlite",
+            "provider",
+        ] {
+            assert!(
+                !encoded.contains(forbidden),
+                "classifier record must not serialize side-effect token `{forbidden}`"
+            );
+        }
     }
 
     #[test]
