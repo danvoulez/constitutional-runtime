@@ -220,10 +220,45 @@ Receipts for the scoped slice:
 - `cargo clippy --workspace --all-targets -- -D warnings` passed
 - forbidden token scan in `crates/minilab-api/src/agent_runtime.rs` found no classifier side-effect path; matches were existing shell/status vocabulary and negative test assertions
 
+## Later Status - Phase 4D through Exit
+
+Phase 4D added `evaluate_ingress_admission`, a data-only admission gate over `PocketRuntimeStateRecord`.
+
+Phase 4E mounted Agent Runtime ingress under:
+
+```text
+POST /api/agent-runtime/places/{place_id}/messages
+GET  /api/agent-runtime/reports/{message_id_or_correlation_id}
+```
+
+Phase 4F added reconstructable `AgentRuntimeIngressReport` records stored by message id and correlation id.
+
+Current ingress path:
+
+```text
+natural-language message
+-> agent.message.received report reference
+-> classify_natural_language_candidate
+-> evaluate_ingress_admission
+-> AgentRuntimeIngressReport
+-> stop before dispatch
+```
+
+The endpoint returns ingress state only. It does not call MCP command handlers, shell, provider/database clients, dispatcher, process execution, Strong compilation, IR lowering, or canonical evidence closure.
+
+The formal exit harness is `crates/minilab-api/tests/agent_runtime_phase4_exit.rs`.
+
+Receipts for the scoped exit:
+
+- `cargo test -p minilab-api agent_runtime` passed: 20 Agent Runtime tests
+- `cargo test -p minilab-api phase4_exit` passed: 4 Phase 4 exit tests
+- `cargo test --workspace` passed: 260 tests
+- `cargo clippy --workspace --all-targets -- -D warnings` passed
+- forbidden token scan found no new side-effect path; matches are dispatch-boundary fields/assertions, documentation boundary language, negative test assertions, and legacy shell-local status vocabulary
+
 ## Ghosts
 
-- Phase 4C classifier surface exists, but submit-message integration, candidate admission, and lowering gates are not implemented by this audit.
-- The main API route mount for Agent Runtime remains unresolved.
-- Existing shell completion statuses may confuse future callers until typed pocket-runtime state is introduced.
-- Evidence closure for natural-language-originated programs remains outside this audit.
-- This audit used source inspection only; no runtime HTTP probe was run.
+- Phase 4 ingress is closed narrowly through ready-for-IR/report reconstruction, but it does not compile, validate, lower, dispatch, or close canonical evidence from natural language.
+- Existing legacy shell/advisory methods still use `completed` vocabulary for shell-local status. That remains outside the new ingress report final-state vocabulary and must not be read as constitutional closure.
+- Evidence closure for natural-language-originated programs remains outside Phase 4.
+- No LLM integration exists yet; the classifier is deterministic and local.

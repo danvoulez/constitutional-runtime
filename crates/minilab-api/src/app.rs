@@ -116,6 +116,7 @@ pub fn build_app(state: AppState) -> Router {
 
     Router::new()
         .merge(health_routes)
+        .nest("/api/agent-runtime", crate::agent_runtime::routes())
         .nest("/webhooks", twilio_routes.merge(sendgrid_routes))
         .nest("/outbound", outbound_routes)
         .nest("/host-pairings", host_pairing_routes)

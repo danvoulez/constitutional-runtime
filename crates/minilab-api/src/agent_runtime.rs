@@ -197,6 +197,50 @@ pub struct NaturalLanguageIngressInput {
     pub text: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeIngressEventRef {
+    pub kind: String,
+    pub ref_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentRuntimeIngressFinalState {
+    ClarificationRequired,
+    Rejected,
+    GhostRecorded,
+    ReadyForIr,
+    AdmissibilityPending,
+    PlannedBeforeDispatch,
+    Blocked,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeIngressReport {
+    pub message_id: String,
+    pub correlation_id: String,
+    pub origin: NaturalLanguageOrigin,
+    pub received_state: IngressState,
+    pub candidate_classification: PocketRuntimeStateRecord,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ghosts: Vec<String>,
+    pub admission_state: AdmissionState,
+    pub ir_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ir_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_result: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub planning_result: Option<String>,
+    pub dispatch_boundary_status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence_event_refs: Vec<AgentRuntimeIngressEventRef>,
+    pub final_state: AgentRuntimeIngressFinalState,
+    pub next_required_action: String,
+}
+
 pub fn classify_natural_language_candidate(
     input: NaturalLanguageIngressInput,
 ) -> PocketRuntimeStateRecord {
@@ -282,6 +326,83 @@ pub fn classify_natural_language_candidate(
     )
 }
 
+pub fn evaluate_ingress_admission(
+    mut record: PocketRuntimeStateRecord,
+) -> PocketRuntimeStateRecord {
+    match record.candidate_kind {
+        CandidateKind::StrongCandidate => {
+            if strong_payload_has_kind(record.proposed_payload.as_ref()) {
+                record.admission_state = AdmissionState::AdmissibilityPending;
+                record.reason_code = Some("strong_candidate_ready_for_ir".into());
+                record
+            } else {
+                mark_admission_ghost(record, "missing_strong_payload", "missing_strong_payload")
+            }
+        }
+        CandidateKind::OperationalCandidate => {
+            if operational_payload_is_complete(record.proposed_payload.as_ref()) {
+                record.admission_state = AdmissionState::AdmissibilityPending;
+                record.reason_code = Some("operational_candidate_ready_for_ir".into());
+                record
+            } else {
+                mark_admission_ghost(
+                    record,
+                    "missing_operational_payload",
+                    "missing_required_field",
+                )
+            }
+        }
+        CandidateKind::ClarificationRequired
+        | CandidateKind::Rejected
+        | CandidateKind::GhostRecord => {
+            record.admission_state = AdmissionState::NotAdmitted;
+            record
+        }
+    }
+}
+
+pub fn build_ingress_report(
+    correlation_id: String,
+    record: PocketRuntimeStateRecord,
+) -> AgentRuntimeIngressReport {
+    let final_state = final_state_for_record(&record);
+    let ir_status = ir_status_for_record(&record).to_string();
+    let ir_reference = (record.admission_state == AdmissionState::AdmissibilityPending)
+        .then(|| format!("ir-ready:{}", record.origin.message_id));
+    let validation_result = (record.admission_state == AdmissionState::AdmissibilityPending)
+        .then(|| "not_reached_ready_for_ir_only".into());
+    let planning_result = (record.admission_state == AdmissionState::AdmissibilityPending)
+        .then(|| "not_reached_ready_for_ir_only".into());
+    let next_required_action = next_required_action_for_state(&final_state).to_string();
+
+    AgentRuntimeIngressReport {
+        message_id: record.origin.message_id.clone(),
+        correlation_id: correlation_id.clone(),
+        origin: record.origin.clone(),
+        received_state: IngressState::Received,
+        ghosts: record.ghost_flags.clone(),
+        admission_state: record.admission_state.clone(),
+        ir_status,
+        ir_reference,
+        validation_result,
+        planning_result,
+        dispatch_boundary_status: "stopped_before_dispatch".into(),
+        evidence_event_refs: vec![
+            AgentRuntimeIngressEventRef {
+                kind: "agent.message.received".into(),
+                ref_id: format!("event:{correlation_id}:received"),
+            },
+            AgentRuntimeIngressEventRef {
+                kind: "agent.candidate.classified".into(),
+                ref_id: format!("event:{correlation_id}:classified"),
+            },
+        ],
+        final_state,
+        next_required_action,
+        candidate_classification: record,
+    }
+}
+
 fn pocket_record(
     origin: NaturalLanguageOrigin,
     ingress_state: IngressState,
@@ -298,6 +419,77 @@ fn pocket_record(
         reason_code: Some(reason_code.into()),
         ghost_flags: ghost_flags.into_iter().map(str::to_string).collect(),
         proposed_payload,
+    }
+}
+
+fn mark_admission_ghost(
+    mut record: PocketRuntimeStateRecord,
+    reason_code: &str,
+    ghost_flag: &str,
+) -> PocketRuntimeStateRecord {
+    record.ingress_state = IngressState::GhostRecorded;
+    record.candidate_kind = CandidateKind::GhostRecord;
+    record.admission_state = AdmissionState::NotAdmitted;
+    record.reason_code = Some(reason_code.into());
+    if !record.ghost_flags.iter().any(|flag| flag == ghost_flag) {
+        record.ghost_flags.push(ghost_flag.into());
+    }
+    record
+}
+
+fn strong_payload_has_kind(payload: Option<&Value>) -> bool {
+    payload
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str)
+        .is_some()
+}
+
+fn operational_payload_is_complete(payload: Option<&Value>) -> bool {
+    let Some(payload) = payload else {
+        return false;
+    };
+    payload.get("intent").and_then(Value::as_str) == Some("reconcile_installation")
+        && payload
+            .get("installation_id")
+            .and_then(Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .is_some()
+}
+
+fn final_state_for_record(record: &PocketRuntimeStateRecord) -> AgentRuntimeIngressFinalState {
+    match record.candidate_kind {
+        CandidateKind::ClarificationRequired => {
+            AgentRuntimeIngressFinalState::ClarificationRequired
+        }
+        CandidateKind::Rejected => AgentRuntimeIngressFinalState::Rejected,
+        CandidateKind::GhostRecord => AgentRuntimeIngressFinalState::GhostRecorded,
+        CandidateKind::StrongCandidate | CandidateKind::OperationalCandidate => {
+            if record.admission_state == AdmissionState::AdmissibilityPending {
+                AgentRuntimeIngressFinalState::ReadyForIr
+            } else {
+                AgentRuntimeIngressFinalState::Blocked
+            }
+        }
+    }
+}
+
+fn ir_status_for_record(record: &PocketRuntimeStateRecord) -> &'static str {
+    if record.admission_state == AdmissionState::AdmissibilityPending {
+        "ready_for_ir"
+    } else {
+        "not_produced"
+    }
+}
+
+fn next_required_action_for_state(state: &AgentRuntimeIngressFinalState) -> &'static str {
+    match state {
+        AgentRuntimeIngressFinalState::ClarificationRequired => "request_clarification",
+        AgentRuntimeIngressFinalState::Rejected => "stop_rejected",
+        AgentRuntimeIngressFinalState::GhostRecorded => "resolve_ghosts",
+        AgentRuntimeIngressFinalState::ReadyForIr => "submit_candidate_to_ir_gate",
+        AgentRuntimeIngressFinalState::AdmissibilityPending => "run_admissibility",
+        AgentRuntimeIngressFinalState::PlannedBeforeDispatch => "operator_review_before_dispatch",
+        AgentRuntimeIngressFinalState::Blocked => "inspect_block",
     }
 }
 
@@ -449,6 +641,8 @@ pub struct AgentRuntimeService {
 #[derive(Debug, Default)]
 struct AgentRuntimeStore {
     sessions: BTreeMap<String, AgentRuntimeSessionSnapshot>,
+    ingress_reports: BTreeMap<String, AgentRuntimeIngressReport>,
+    ingress_reports_by_correlation: BTreeMap<String, String>,
 }
 
 impl AgentRuntimeService {
@@ -479,6 +673,38 @@ impl AgentRuntimeService {
         }
         let draft = classify_message(text, profile, &request.files);
         self.record_draft(profile, request.session_id, request.app_id, draft)
+    }
+
+    pub fn submit_ingress_message(
+        &self,
+        place_id_or_slug: &str,
+        request: AgentRuntimeSendRequest,
+    ) -> Result<AgentRuntimeIngressReport, ApiError> {
+        let profile = self.require_profile(place_id_or_slug)?;
+        let message_id = Uuid::new_v4().to_string();
+        let correlation_id = Uuid::new_v4().to_string();
+        let origin = NaturalLanguageOrigin {
+            message_id: message_id.clone(),
+            place_id: profile.place_id.clone(),
+            session_id: request.session_id,
+            app_id: request.app_id,
+        };
+        let classified = classify_natural_language_candidate(NaturalLanguageIngressInput {
+            origin,
+            text: request.text,
+        });
+        let admitted = evaluate_ingress_admission(classified);
+        let report = build_ingress_report(correlation_id, admitted);
+
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::upstream("agent runtime store lock poisoned"))?;
+        guard
+            .ingress_reports_by_correlation
+            .insert(report.correlation_id.clone(), message_id.clone());
+        guard.ingress_reports.insert(message_id, report.clone());
+        Ok(report)
     }
 
     pub fn submit_place_intent(
@@ -958,6 +1184,23 @@ impl AgentRuntimeService {
         Ok(guard.sessions.get(session_id).cloned())
     }
 
+    pub fn get_ingress_report(
+        &self,
+        report_id: &str,
+    ) -> Result<Option<AgentRuntimeIngressReport>, ApiError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|_| ApiError::upstream("agent runtime store lock poisoned"))?;
+        if let Some(report) = guard.ingress_reports.get(report_id) {
+            return Ok(Some(report.clone()));
+        }
+        let Some(message_id) = guard.ingress_reports_by_correlation.get(report_id) else {
+            return Ok(None);
+        };
+        Ok(guard.ingress_reports.get(message_id).cloned())
+    }
+
     pub fn resolve_profile(
         &self,
         place_id_or_slug: &str,
@@ -1204,6 +1447,7 @@ fn push_audit_event(snapshot: &mut AgentRuntimeSessionSnapshot, kind: &str, summ
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/places/{place_id}/messages", post(post_message))
+        .route("/reports/{report_id}", get(get_ingress_report))
         .route("/sessions/{session_id}", get(get_session))
 }
 
@@ -1211,9 +1455,22 @@ async fn post_message(
     State(state): State<AppState>,
     Path(place_id): Path<String>,
     Json(body): Json<AgentRuntimeSendRequest>,
-) -> Result<Json<AgentRuntimeSendAck>, ApiError> {
-    let ack = state.agent_runtime.submit_message(&place_id, body)?;
-    Ok(Json(ack))
+) -> Result<Json<AgentRuntimeIngressReport>, ApiError> {
+    let report = state
+        .agent_runtime
+        .submit_ingress_message(&place_id, body)?;
+    Ok(Json(report))
+}
+
+async fn get_ingress_report(
+    State(state): State<AppState>,
+    Path(report_id): Path<String>,
+) -> Result<Json<AgentRuntimeIngressReport>, ApiError> {
+    let report = state
+        .agent_runtime
+        .get_ingress_report(&report_id)?
+        .ok_or_else(|| ApiError::bad_request(format!("unknown ingress report `{report_id}`")))?;
+    Ok(Json(report))
 }
 
 async fn get_session(
@@ -1457,6 +1714,126 @@ mod tests {
                 "classifier record must not serialize side-effect token `{forbidden}`"
             );
         }
+    }
+
+    #[test]
+    fn admission_gate_marks_operational_candidate_ready_for_ir() {
+        let record = classify("reconcile installation 8d4df830-4d1f-4a9f-bc17-7de11580d8f3");
+        let admitted = evaluate_ingress_admission(record);
+
+        assert_eq!(admitted.candidate_kind, CandidateKind::OperationalCandidate);
+        assert_eq!(
+            admitted.admission_state,
+            AdmissionState::AdmissibilityPending
+        );
+        assert_eq!(
+            admitted.reason_code.as_deref(),
+            Some("operational_candidate_ready_for_ir")
+        );
+    }
+
+    #[test]
+    fn admission_gate_does_not_admit_clarification_or_ghost_records() {
+        let clarification = evaluate_ingress_admission(classify("reconcile the installation"));
+        assert_eq!(
+            clarification.candidate_kind,
+            CandidateKind::ClarificationRequired
+        );
+        assert_eq!(clarification.admission_state, AdmissionState::NotAdmitted);
+
+        let ghost = evaluate_ingress_admission(classify("is this verified?"));
+        assert_eq!(ghost.candidate_kind, CandidateKind::GhostRecord);
+        assert_eq!(ghost.admission_state, AdmissionState::NotAdmitted);
+    }
+
+    #[test]
+    fn admission_gate_marks_strong_candidate_ready_for_ir() {
+        let record = classify(r#"{ "kind": "Emit", "event": "demo.started" }"#);
+        let admitted = evaluate_ingress_admission(record);
+
+        assert_eq!(admitted.candidate_kind, CandidateKind::StrongCandidate);
+        assert_eq!(
+            admitted.admission_state,
+            AdmissionState::AdmissibilityPending
+        );
+        assert_eq!(
+            admitted.reason_code.as_deref(),
+            Some("strong_candidate_ready_for_ir")
+        );
+    }
+
+    #[test]
+    fn ingress_report_reconstructs_ready_for_ir_without_dispatch() {
+        let record = evaluate_ingress_admission(classify(
+            "reconcile installation 8d4df830-4d1f-4a9f-bc17-7de11580d8f3",
+        ));
+        let report = build_ingress_report("corr-1".into(), record);
+
+        assert_eq!(
+            report.final_state,
+            AgentRuntimeIngressFinalState::ReadyForIr
+        );
+        assert_eq!(report.ir_status, "ready_for_ir");
+        assert_eq!(report.dispatch_boundary_status, "stopped_before_dispatch");
+        assert!(report.ir_reference.is_some());
+        assert_eq!(report.next_required_action, "submit_candidate_to_ir_gate");
+        assert!(report
+            .evidence_event_refs
+            .iter()
+            .any(|event| event.kind == "agent.message.received"));
+    }
+
+    #[test]
+    fn ingress_report_distinguishes_rejection_from_clarification() {
+        let rejected = build_ingress_report(
+            "corr-rejected".into(),
+            evaluate_ingress_admission(classify("run this now")),
+        );
+        let clarification = build_ingress_report(
+            "corr-clarification".into(),
+            evaluate_ingress_admission(classify("reconcile the installation")),
+        );
+
+        assert_eq!(
+            rejected.final_state,
+            AgentRuntimeIngressFinalState::Rejected
+        );
+        assert_eq!(
+            clarification.final_state,
+            AgentRuntimeIngressFinalState::ClarificationRequired
+        );
+        assert_eq!(rejected.ir_status, "not_produced");
+        assert_eq!(clarification.ir_status, "not_produced");
+    }
+
+    #[test]
+    fn submit_ingress_message_stores_reconstructable_report_by_message_and_correlation() {
+        let service = AgentRuntimeService::new().expect("embedded profile should parse");
+        let report = service
+            .submit_ingress_message(
+                "chatgpt_workspace",
+                AgentRuntimeSendRequest {
+                    session_id: None,
+                    text: "reconcile installation 8d4df830-4d1f-4a9f-bc17-7de11580d8f3".into(),
+                    app_id: None,
+                    policy_overrides: None,
+                    files: vec![],
+                },
+            )
+            .expect("ingress should produce report");
+
+        let by_message = service
+            .get_ingress_report(&report.message_id)
+            .expect("read by message should succeed")
+            .expect("report should exist");
+        let by_correlation = service
+            .get_ingress_report(&report.correlation_id)
+            .expect("read by correlation should succeed")
+            .expect("report should exist");
+
+        assert_eq!(by_message.message_id, report.message_id);
+        assert_eq!(by_correlation.message_id, report.message_id);
+        assert_eq!(report.dispatch_boundary_status, "stopped_before_dispatch");
     }
 
     #[test]

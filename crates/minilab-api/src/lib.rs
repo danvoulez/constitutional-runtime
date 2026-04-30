@@ -6,7 +6,10 @@ pub mod mcp_artifacts;
 pub mod mcp_command;
 pub mod mcp_query;
 
-pub use agent_runtime::{routes as build_agent_runtime_routes, AgentRuntimeService, PlaceProfile};
+pub use agent_runtime::{
+    routes as build_agent_runtime_routes, AgentRuntimeIngressFinalState, AgentRuntimeIngressReport,
+    AgentRuntimeService, CandidateKind, PlaceProfile,
+};
 pub use app::{build_app, AppState};
 pub use config::ApiConfig;
 pub use error::ApiError;

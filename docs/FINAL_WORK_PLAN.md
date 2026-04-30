@@ -305,12 +305,28 @@ Evidence kinds:
 
 Mandatory test:
 
-- No agent-runtime output may skip IR, validation, planning, or evidence.
+- No agent-runtime output may claim material execution while skipping IR, validation, planning, or evidence.
+- Ingress-only reports may stop at `ready_for_ir`, clarification, rejection, or ghost state.
 
 Exit condition:
 
-- A natural-language message produces a reconstructable `ExecutionReport`.
+- A natural-language message produces a reconstructable `ExecutionReport` or ingress-scoped `AgentRuntimeIngressReport`.
 - No agent-runtime path emits directly.
+
+Current status:
+
+Phase 4 ingress is closed narrowly through deterministic pocket-runtime ingress:
+
+```txt
+natural-language message
+-> classifier
+-> admission gate
+-> reconstructable AgentRuntimeIngressReport
+-> ready_for_ir | clarification_required | rejected | ghost_recorded
+-> STOP before dispatch
+```
+
+This does not implement LLM classification, Strong-originated execution, provider/database mutation, production dispatch, or canonical evidence closure for natural-language-originated programs.
 
 ### Phase 4 LLM Roles
 
